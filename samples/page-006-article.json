@@ -1,0 +1,7 @@
+{
+  "description": "Catalog article for the layout-review demo. PUT to /api/catalog/articles/A-600 after uploading samples/page-006-review.json. It cites block 4, so blocks 1-3 remain uncataloged and block 4 shows review_status=cataloged.",
+  "title": "Pier Repair Approved",
+  "blocks": [
+    {"page_id": "page-006", "block_no": 4}
+  ]
+}

@@ -10,7 +10,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from .schemas import CatalogArticleInput, OCRPageInput, OCRWordInput
+from .schemas import (
+    BlockReviewInput,
+    CatalogArticleInput,
+    OCRPageInput,
+    OCRWordInput,
+)
 
 
 SCHEMA = """
@@ -89,6 +94,33 @@ CREATE TABLE IF NOT EXISTS article_index (
 CREATE INDEX IF NOT EXISTS idx_article_index_token ON article_index(token);
 CREATE INDEX IF NOT EXISTS idx_article_index_article_seq
     ON article_index(article_id, seq);
+
+-- Per-block verification marks.  A row exists only while an archivist has
+-- declared an uncataloged OCR block to be non-body text (header/ad/...).
+-- No FK to page_blocks on purpose: OCR replacement deletes and re-inserts
+-- page_blocks inside one transaction, and the reconciliation logic in
+-- upsert_page_ocr decides explicitly which marks survive.
+CREATE TABLE IF NOT EXISTS block_reviews (
+    page_id          TEXT NOT NULL,
+    block_no         INTEGER NOT NULL,
+    marked_reason    TEXT,
+    marked_at        TEXT NOT NULL,
+    marked_version   INTEGER NOT NULL,
+    PRIMARY KEY (page_id, block_no)
+);
+
+-- Monotonic per-block review token.  It is bumped (never reused, even when a
+-- block is deleted and later restored byte-for-byte) whenever the block's OCR
+-- content or its catalog-reference state changes.  Fetched as the optimistic
+-- expected_version of every mark submission.
+CREATE TABLE IF NOT EXISTS block_versions (
+    page_id        TEXT NOT NULL,
+    block_no       INTEGER NOT NULL,
+    review_version INTEGER NOT NULL,
+    exists_flag    INTEGER NOT NULL,
+    last_change    TEXT NOT NULL,
+    PRIMARY KEY (page_id, block_no)
+);
 """
 
 MAX_PHRASE_TOKENS = 40
@@ -281,6 +313,188 @@ def _replace_page_source(
     return revision, word_count
 
 
+# ---------------------------------------------------------------------------
+# Layout review helpers
+# ---------------------------------------------------------------------------
+
+
+def _touch_review_version(
+    conn: sqlite3.Connection,
+    page_id: str,
+    block_no: int,
+    *,
+    exists_flag: bool,
+    change: str,
+) -> int:
+    """Bump (or create) a block's review token and return its new value.
+
+    Tokens are strictly monotonic per (page, block), including across delete
+    and byte-identical restore cycles, so a token captured before any change
+    can never validate a submission made after it.
+    """
+    row = conn.execute(
+        "SELECT review_version FROM block_versions WHERE page_id = ? AND block_no = ?",
+        (page_id, block_no),
+    ).fetchone()
+    version = (int(row["review_version"]) + 1) if row else 1
+    conn.execute(
+        """
+        INSERT INTO block_versions
+            (page_id, block_no, review_version, exists_flag, last_change)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(page_id, block_no) DO UPDATE SET
+            review_version = excluded.review_version,
+            exists_flag = excluded.exists_flag,
+            last_change = excluded.last_change
+        """,
+        (page_id, block_no, version, 1 if exists_flag else 0, change),
+    )
+    return version
+
+
+def _current_review_version(
+    conn: sqlite3.Connection, page_id: str, block_no: int
+) -> int | None:
+    row = conn.execute(
+        "SELECT review_version FROM block_versions WHERE page_id = ? AND block_no = ?",
+        (page_id, block_no),
+    ).fetchone()
+    return int(row["review_version"]) if row else None
+
+
+def _block_fingerprint(
+    words: list[OCRWordInput] | list[sqlite3.Row],
+) -> list[tuple[str, float, float, float, float]]:
+    """Identity of a block: ordered (word_no, text, bbox) tuples.
+
+    A mark only survives an OCR re-run when block number, word order, original
+    text and every word box are all unchanged.
+    """
+    fingerprint: list[tuple[str, float, float, float, float]] = []
+    for word_no, word in enumerate(words):
+        if isinstance(word, sqlite3.Row):
+            fingerprint.append(
+                (
+                    str(word["text"]),
+                    float(word["x0"]),
+                    float(word["y0"]),
+                    float(word["x1"]),
+                    float(word["y1"]),
+                )
+            )
+        else:
+            fingerprint.append(
+                (
+                    word.text,
+                    float(word.bbox.x0),
+                    float(word.bbox.y0),
+                    float(word.bbox.x1),
+                    float(word.bbox.y1),
+                )
+            )
+    return fingerprint
+
+
+def _existing_block_fingerprints(
+    conn: sqlite3.Connection, page_id: str
+) -> dict[int, list[tuple[str, float, float, float, float]]]:
+    rows = conn.execute(
+        """
+        SELECT block_no, word_no, text, x0, y0, x1, y1
+        FROM page_words
+        WHERE page_id = ?
+        ORDER BY block_no, word_no
+        """,
+        (page_id,),
+    ).fetchall()
+    grouped: dict[int, list[sqlite3.Row]] = defaultdict(list)
+    for row in rows:
+        grouped[int(row["block_no"])].append(row)
+    return {
+        block_no: _block_fingerprint(block_rows)
+        for block_no, block_rows in grouped.items()
+    }
+
+
+def _page_referenced_blocks(conn: sqlite3.Connection, page_id: str) -> set[int]:
+    rows = conn.execute(
+        "SELECT DISTINCT block_no FROM catalog_blocks WHERE page_id = ?",
+        (page_id,),
+    ).fetchall()
+    return {int(row["block_no"]) for row in rows}
+
+
+def _review_status_for(
+    referenced: bool,
+    mark: sqlite3.Row | None,
+    review_version: int,
+) -> str:
+    if referenced:
+        return "cataloged"
+    if mark is not None and int(mark["marked_version"]) == review_version:
+        return "marked_non_body"
+    return "pending_review"
+
+
+def _build_block_review(
+    conn: sqlite3.Connection,
+    page_id: str,
+    block_row: sqlite3.Row,
+    word_rows: list[sqlite3.Row],
+    referenced_blocks: set[int],
+) -> dict[str, Any]:
+    block_no = int(block_row["block_no"])
+    referenced = block_no in referenced_blocks
+    version_row = conn.execute(
+        "SELECT review_version, last_change FROM block_versions "
+        "WHERE page_id = ? AND block_no = ?",
+        (page_id, block_no),
+    ).fetchone()
+    review_version = int(version_row["review_version"]) if version_row else 1
+    last_change = version_row["last_change"] if version_row else None
+
+    mark = conn.execute(
+        "SELECT marked_reason, marked_at, marked_version FROM block_reviews "
+        "WHERE page_id = ? AND block_no = ?",
+        (page_id, block_no),
+    ).fetchone()
+    review_status = _review_status_for(referenced, mark, review_version)
+
+    x0 = min(float(row["x0"]) for row in word_rows)
+    y0 = min(float(row["y0"]) for row in word_rows)
+    x1 = max(float(row["x1"]) for row in word_rows)
+    y1 = max(float(row["y1"]) for row in word_rows)
+
+    return {
+        "block_no": block_no,
+        "ordinal": int(block_row["ordinal"]),
+        "referenced": referenced,
+        "review_status": review_status,
+        "review_version": review_version,
+        "last_change": last_change,
+        "marked_reason": mark["marked_reason"] if mark else None,
+        "marked_at": mark["marked_at"] if mark else None,
+        "marked_version": (
+            int(mark["marked_version"]) if mark is not None else None
+        ),
+        "text": " ".join(str(row["text"]) for row in word_rows),
+        "bbox": {"x0": x0, "y0": y0, "x1": x1, "y1": y1},
+        "words": [
+            {
+                "word_no": int(row["word_no"]),
+                "text": str(row["text"]),
+                "bbox": {
+                    "x0": float(row["x0"]),
+                    "y0": float(row["y0"]),
+                    "x1": float(row["x1"]),
+                    "y1": float(row["y1"]),
+                },
+            }
+            for row in word_rows
+        ],
+    }
+
+
 def _rebuild_article(conn: sqlite3.Connection, article_id: str) -> int:
     """Rebuild one article's flattened OCR sequence from current page OCR.
 
@@ -387,9 +601,105 @@ def upsert_page_ocr(
                     unchanged=True,
                 )
 
+            # Snapshot the outgoing content while the old page rows still exist.
+            old_fingerprints = _existing_block_fingerprints(conn, page_id)
+            old_marks = {
+                int(row["block_no"]): row
+                for row in conn.execute(
+                    "SELECT block_no FROM block_reviews WHERE page_id = ?",
+                    (page_id,),
+                ).fetchall()
+            }
+
             revision, word_count = _replace_page_source(
                 conn, page_id, payload, blocks, updated_at
             )
+
+            # Reconcile verification state with the new OCR.  Everything in
+            # this branch commits (or rolls back) together with the OCR rows
+            # and the rebuilt article indexes.
+            marks_carried: list[dict[str, Any]] = []
+            marks_reset: list[dict[str, Any]] = []
+            for block_no, words in blocks:
+                new_fingerprint = _block_fingerprint(words)
+                if block_no in old_fingerprints:
+                    if old_fingerprints[block_no] == new_fingerprint:
+                        # Identical block number, word order, text and boxes:
+                        # keep both the token and any existing mark.
+                        if block_no in old_marks:
+                            marks_carried.append(
+                                {
+                                    "page_id": page_id,
+                                    "block_no": block_no,
+                                    "review_version": _current_review_version(
+                                        conn, page_id, block_no
+                                    )
+                                    or 1,
+                                }
+                            )
+                        conn.execute(
+                            "UPDATE block_versions SET exists_flag = 1, "
+                            "last_change = ? WHERE page_id = ? AND block_no = ?",
+                            ("ocr_unchanged", page_id, block_no),
+                        )
+                        # A block may have no version row yet if it predates
+                        # the review tables; create one without consuming a bump.
+                        if _current_review_version(conn, page_id, block_no) is None:
+                            conn.execute(
+                                """
+                                INSERT INTO block_versions
+                                    (page_id, block_no, review_version,
+                                     exists_flag, last_change)
+                                VALUES (?, ?, 1, 1, 'ocr_unchanged')
+                                """,
+                                (page_id, block_no),
+                            )
+                    else:
+                        version = _touch_review_version(
+                            conn,
+                            page_id,
+                            block_no,
+                            exists_flag=True,
+                            change="ocr_content_changed",
+                        )
+                        conn.execute(
+                            "DELETE FROM block_reviews "
+                            "WHERE page_id = ? AND block_no = ?",
+                            (page_id, block_no),
+                        )
+                        if block_no in old_marks:
+                            marks_reset.append(
+                                {
+                                    "page_id": page_id,
+                                    "block_no": block_no,
+                                    "review_version": version,
+                                }
+                            )
+                else:
+                    _touch_review_version(
+                        conn,
+                        page_id,
+                        block_no,
+                        exists_flag=True,
+                        change="ocr_block_added",
+                    )
+
+            for block_no in old_fingerprints:
+                if block_no not in provided:
+                    # Deleted blocks keep their history with a fresh token so a
+                    # later byte-identical restore still cannot reuse old marks.
+                    _touch_review_version(
+                        conn,
+                        page_id,
+                        block_no,
+                        exists_flag=False,
+                        change="ocr_block_deleted",
+                    )
+                    conn.execute(
+                        "DELETE FROM block_reviews "
+                        "WHERE page_id = ? AND block_no = ?",
+                        (page_id, block_no),
+                    )
 
             for article_id in affected:
                 _rebuild_article(conn, article_id)
@@ -401,9 +711,11 @@ def upsert_page_ocr(
                 "blocks_count": len(blocks),
                 "words_count": word_count,
                 "affected_articles": affected,
+                "review_marks_carried": marks_carried,
+                "review_marks_reset": marks_reset,
                 "message": (
-                    "Page OCR and all affected article indexes committed "
-                    "atomically."
+                    "Page OCR, verification marks and all affected article "
+                    "indexes committed atomically."
                 ),
             }
 
@@ -424,6 +736,10 @@ def upsert_catalog_article(
                 "SELECT revision FROM articles WHERE article_id = ?",
                 (article_id,),
             ).fetchone()
+            old_ref_rows = conn.execute(
+                "SELECT page_id, block_no FROM catalog_blocks WHERE article_id = ?",
+                (article_id,),
+            ).fetchall()
 
             missing = []
             for ref in payload.blocks:
@@ -491,8 +807,60 @@ def upsert_catalog_article(
                 ],
             )
 
+            # Reference-state transitions bump the block's review token:
+            # 0 -> 1 revokes any mark (the block is now cataloged body text);
+            # 1 -> 0 means the block left the catalog and must be re-checked.
+            old_counts: dict[tuple[str, int], int] = {}
+            for row in old_ref_rows:
+                key = (str(row["page_id"]), int(row["block_no"]))
+                old_counts[key] = old_counts.get(key, 0) + 1
+            new_counts: dict[tuple[str, int], int] = defaultdict(int)
+            for ref in payload.blocks:
+                new_counts[(ref.page_id, ref.block_no)] += 1
+
+            revoked_review_marks: list[dict[str, str | int]] = []
+            all_keys = sorted(set(old_counts) | set(new_counts))
+            for ref_page_id, ref_block_no in all_keys:
+                before = old_counts.get((ref_page_id, ref_block_no), 0)
+                after = new_counts.get((ref_page_id, ref_block_no), 0)
+                if before == after:
+                    continue
+                exists = conn.execute(
+                    "SELECT 1 FROM page_blocks WHERE page_id = ? AND block_no = ?",
+                    (ref_page_id, ref_block_no),
+                ).fetchone()
+                change = (
+                    "catalog_referenced" if after > 0 else "catalog_unreferenced"
+                )
+                had_mark = conn.execute(
+                    "SELECT 1 FROM block_reviews "
+                    "WHERE page_id = ? AND block_no = ?",
+                    (ref_page_id, ref_block_no),
+                ).fetchone()
+                version = _touch_review_version(
+                    conn,
+                    ref_page_id,
+                    ref_block_no,
+                    exists_flag=bool(exists),
+                    change=change,
+                )
+                conn.execute(
+                    "DELETE FROM block_reviews WHERE page_id = ? AND block_no = ?",
+                    (ref_page_id, ref_block_no),
+                )
+                if after > 0 and had_mark:
+                    revoked_review_marks.append(
+                        {
+                            "page_id": ref_page_id,
+                            "block_no": ref_block_no,
+                            "review_version": version,
+                        }
+                    )
+
             _rebuild_article(conn, article_id)
-            return _article_info_from_conn(conn, article_id)
+            info = _article_info_from_conn(conn, article_id)
+            info["revoked_review_marks"] = revoked_review_marks
+            return info
 
 
 def _page_info_from_conn(conn: sqlite3.Connection, page_id: str) -> dict[str, Any]:
@@ -583,6 +951,7 @@ def _article_info_from_conn(
             {"page_id": row["page_id"], "block_no": int(row["block_no"])}
             for row in blocks
         ],
+        "revoked_review_marks": [],
     }
 
 
@@ -592,6 +961,301 @@ def get_article_info(
     with _connection(db_path) as conn:
         with _read_transaction(conn):
             return _article_info_from_conn(conn, article_id)
+
+
+# ---------------------------------------------------------------------------
+# Layout review: uncataloged word-block verification
+# ---------------------------------------------------------------------------
+
+
+def _page_review_from_conn(
+    conn: sqlite3.Connection, page_id: str
+) -> dict[str, Any]:
+    page = conn.execute(
+        "SELECT * FROM pages WHERE page_id = ?", (page_id,)
+    ).fetchone()
+    if not page:
+        raise DomainError(404, "page_not_found", f"page {page_id!r} was not found")
+
+    block_rows = conn.execute(
+        "SELECT block_no, ordinal FROM page_blocks WHERE page_id = ? ORDER BY ordinal",
+        (page_id,),
+    ).fetchall()
+    word_rows = conn.execute(
+        """
+        SELECT block_no, word_no, text, x0, y0, x1, y1
+        FROM page_words
+        WHERE page_id = ?
+        ORDER BY block_no, word_no
+        """,
+        (page_id,),
+    ).fetchall()
+    words_by_block: dict[int, list[sqlite3.Row]] = defaultdict(list)
+    for row in word_rows:
+        words_by_block[int(row["block_no"])].append(row)
+
+    referenced_blocks = _page_referenced_blocks(conn, page_id)
+
+    # The checklist covers word blocks only; empty layout blocks have no OCR
+    # text and therefore nothing that could be miscataloged.
+    blocks = [
+        _build_block_review(
+            conn, page_id, block_row, words_by_block[int(block_row["block_no"])],
+            referenced_blocks,
+        )
+        for block_row in block_rows
+        if words_by_block[int(block_row["block_no"])]
+    ]
+
+    cataloged = sum(1 for block in blocks if block["review_status"] == "cataloged")
+    marked = sum(
+        1 for block in blocks if block["review_status"] == "marked_non_body"
+    )
+    pending = sum(
+        1 for block in blocks if block["review_status"] == "pending_review"
+    )
+    return {
+        "page_id": page["page_id"],
+        "revision": int(page["revision"]),
+        "updated_at": page["updated_at"],
+        "review_status": "complete" if not pending else "pending_review",
+        "blocks_total": len(blocks),
+        "blocks_cataloged": cataloged,
+        "blocks_marked_non_body": marked,
+        "blocks_pending": pending,
+        "blocks": blocks,
+    }
+
+
+def get_page_review(
+    db_path: str | os.PathLike[str], page_id: str
+) -> dict[str, Any]:
+    page_id = page_id.strip()
+    if not page_id:
+        raise DomainError(422, "invalid_page_id", "page_id must not be blank")
+    with _connection(db_path) as conn:
+        with _read_transaction(conn):
+            return _page_review_from_conn(conn, page_id)
+
+
+def _load_review_target(
+    conn: sqlite3.Connection, page_id: str, block_no: int
+) -> tuple[sqlite3.Row, list[sqlite3.Row], bool, int, str | None]:
+    """Resolve and validate one block for a mark mutation.
+
+    Raises a structured DomainError when the block was deleted, changed or
+    cataloged after the caller fetched the checklist.
+    """
+    block_row = conn.execute(
+        "SELECT block_no, ordinal FROM page_blocks "
+        "WHERE page_id = ? AND block_no = ?",
+        (page_id, block_no),
+    ).fetchone()
+    if not block_row:
+        raise DomainError(
+            404,
+            "block_not_found",
+            (
+                "Submission rejected: the target OCR block no longer exists. "
+                "Refetch the page review checklist and re-check the block."
+            ),
+            page_id=page_id,
+            block_no=block_no,
+        )
+
+    word_rows = conn.execute(
+        """
+        SELECT word_no, text, x0, y0, x1, y1
+        FROM page_words
+        WHERE page_id = ? AND block_no = ?
+        ORDER BY word_no
+        """,
+        (page_id, block_no),
+    ).fetchall()
+    if not word_rows:
+        raise DomainError(
+            404,
+            "block_not_found",
+            (
+                "Submission rejected: the target block has no OCR words. "
+                "Refetch the page review checklist and re-check the block."
+            ),
+            page_id=page_id,
+            block_no=block_no,
+        )
+
+    version_row = conn.execute(
+        "SELECT review_version, last_change FROM block_versions "
+        "WHERE page_id = ? AND block_no = ?",
+        (page_id, block_no),
+    ).fetchone()
+    review_version = int(version_row["review_version"]) if version_row else 1
+    last_change = version_row["last_change"] if version_row else None
+
+    referenced = block_no in _page_referenced_blocks(conn, page_id)
+    return block_row, word_rows, referenced, review_version, last_change
+
+
+def _assert_review_token(
+    expected_version: int,
+    review_version: int,
+    *,
+    referenced: bool,
+    last_change: str | None,
+    page_id: str,
+    block_no: int,
+) -> None:
+    if referenced:
+        raise DomainError(
+            409,
+            "block_now_cataloged",
+            (
+                "Submission rejected: the block has been cited by a catalog "
+                "article, so any verification mark was revoked. Refetch the "
+                "checklist; cataloged blocks need no non-body mark."
+            ),
+            page_id=page_id,
+            block_no=block_no,
+            expected_version=expected_version,
+            current_version=review_version,
+            last_change=last_change,
+            recheck_required=True,
+        )
+    if expected_version != review_version:
+        raise DomainError(
+            409,
+            "review_version_stale",
+            (
+                "Submission rejected: the target block changed, was deleted or "
+                "was referenced since you fetched the checklist (even if its "
+                "content looks restored). Refetch the checklist and re-check "
+                "the block."
+            ),
+            page_id=page_id,
+            block_no=block_no,
+            expected_version=expected_version,
+            current_version=review_version,
+            last_change=last_change,
+            recheck_required=True,
+        )
+
+
+def mark_block_non_body(
+    db_path: str | os.PathLike[str],
+    page_id: str,
+    block_no: int,
+    payload: BlockReviewInput,
+) -> dict[str, Any]:
+    page_id = page_id.strip()
+    if not page_id:
+        raise DomainError(422, "invalid_page_id", "page_id must not be blank")
+
+    with _connection(db_path) as conn:
+        with _write_transaction(conn):
+            (
+                block_row,
+                word_rows,
+                referenced,
+                review_version,
+                last_change,
+            ) = _load_review_target(conn, page_id, block_no)
+            _assert_review_token(
+                payload.expected_version,
+                review_version,
+                referenced=referenced,
+                last_change=last_change,
+                page_id=page_id,
+                block_no=block_no,
+            )
+
+            marked_at = utc_now()
+            conn.execute(
+                """
+                INSERT INTO block_reviews
+                    (page_id, block_no, marked_reason, marked_at, marked_version)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(page_id, block_no) DO UPDATE SET
+                    marked_reason = excluded.marked_reason,
+                    marked_at = excluded.marked_at,
+                    marked_version = excluded.marked_version
+                """,
+                (page_id, block_no, payload.reason, marked_at, review_version),
+            )
+
+            summary = _page_review_from_conn(conn, page_id)
+            review = next(
+                block
+                for block in summary["blocks"]
+                if block["block_no"] == block_no
+            )
+            return {
+                "page_id": page_id,
+                "block_no": block_no,
+                "review": review,
+                "page_review_status": summary["review_status"],
+                "message": "Block marked as non-body text.",
+            }
+
+
+def clear_block_review(
+    db_path: str | os.PathLike[str],
+    page_id: str,
+    block_no: int,
+    expected_version: int,
+) -> dict[str, Any]:
+    page_id = page_id.strip()
+    if not page_id:
+        raise DomainError(422, "invalid_page_id", "page_id must not be blank")
+
+    with _connection(db_path) as conn:
+        with _write_transaction(conn):
+            (
+                block_row,
+                word_rows,
+                referenced,
+                review_version,
+                last_change,
+            ) = _load_review_target(conn, page_id, block_no)
+            _assert_review_token(
+                expected_version,
+                review_version,
+                referenced=referenced,
+                last_change=last_change,
+                page_id=page_id,
+                block_no=block_no,
+            )
+
+            mark = conn.execute(
+                "SELECT 1 FROM block_reviews WHERE page_id = ? AND block_no = ?",
+                (page_id, block_no),
+            ).fetchone()
+            if not mark:
+                raise DomainError(
+                    404,
+                    "review_mark_not_found",
+                    "No non-body mark exists for this block.",
+                    page_id=page_id,
+                    block_no=block_no,
+                    current_version=review_version,
+                )
+            conn.execute(
+                "DELETE FROM block_reviews WHERE page_id = ? AND block_no = ?",
+                (page_id, block_no),
+            )
+
+            summary = _page_review_from_conn(conn, page_id)
+            review = next(
+                block
+                for block in summary["blocks"]
+                if block["block_no"] == block_no
+            )
+            return {
+                "page_id": page_id,
+                "block_no": block_no,
+                "review": review,
+                "page_review_status": summary["review_status"],
+                "message": "Non-body mark removed; the block needs re-check.",
+            }
 
 
 def _candidate_starts(
@@ -771,6 +1435,7 @@ def health_counts(db_path: str | os.PathLike[str]) -> dict[str, Any]:
         articles = conn.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
         ocr_words = conn.execute("SELECT COUNT(*) FROM page_words").fetchone()[0]
         indexed_words = conn.execute("SELECT COUNT(*) FROM article_index").fetchone()[0]
+        review_marks = conn.execute("SELECT COUNT(*) FROM block_reviews").fetchone()[0]
     return {
         "status": "ok",
         "database": str(db_path),
@@ -778,6 +1443,7 @@ def health_counts(db_path: str | os.PathLike[str]) -> dict[str, Any]:
         "articles": int(articles),
         "ocr_words": int(ocr_words),
         "indexed_words": int(indexed_words),
+        "review_marks": int(review_marks),
     }
 
 

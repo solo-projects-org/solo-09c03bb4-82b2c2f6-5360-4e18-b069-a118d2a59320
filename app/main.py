@@ -11,10 +11,13 @@ from fastapi.staticfiles import StaticFiles
 from . import __version__
 from .repository import (
     DomainError,
+    clear_block_review,
     get_article_info,
     get_page_info,
+    get_page_review,
     health_counts,
     initialize_database,
+    mark_block_non_body,
     search_phrase,
     seed_demo_if_empty,
     upsert_catalog_article,
@@ -22,11 +25,14 @@ from .repository import (
 )
 from .schemas import (
     ArticleInfo,
+    BlockReviewInput,
+    BlockReviewMutationResponse,
     CatalogArticleInput,
     HealthResponse,
     OCRPageInput,
     OCRUpdateResponse,
     PageInfo,
+    PageReviewSummary,
     PhraseSearchResponse,
 )
 
@@ -60,6 +66,20 @@ Phrase search over OCR tokens, with per-word page and image-box locations.
 单版 OCR 重传会在一个 SQLite `BEGIN IMMEDIATE` 事务中替换该版 OCR，并只重建
 引用该版面的文章索引。搜索使用同一读快照，因此并发查询只会看到更正前或更正后的
 完整结果，不会看到半重建状态。
+
+### 版面核查（漏编正文）
+
+* `GET /api/pages/{page_id}/review` 按版列出所有**有词块**：原文、逐词字框与块
+  字框、核查状态（`cataloged` / `marked_non_body` / `pending_review`）和乐观令牌
+  `review_version`。
+* 档案员把页眉、广告等非正文块用 `PUT .../review/blocks/{block_no}` 标记；当该版
+  每个有词块都有编目引用或有效标记时，`review_status` 为 `complete`。
+* 同一张扫描图重跑 OCR 时，仅当块号、词序、原文和字框全部不变才沿用标记
+  （响应中的 `review_marks_carried`）；任一变化都会使标记失效并提升版本号
+  （`review_marks_reset`），该块回到待核查。
+* 块一旦被文章引用，其标记在同一事务内撤销；后来移出编目也会提升版本号，必须重查。
+* 提交标记时若目标块曾变更、删除或被引用——即使内容恢复原样——令牌已失效，返回
+  **409** 并提示重新拉取清单；其它块的变动不影响本块提交。
 """
 
 
@@ -100,6 +120,10 @@ def create_app(
         openapi_tags=[
             {"name": "pages", "description": "OCR page ingestion and inspection"},
             {"name": "catalog", "description": "Article block order from cataloging"},
+            {
+                "name": "review",
+                "description": "Layout review: uncataloged OCR word-block verification",
+            },
             {"name": "search", "description": "Case-insensitive OCR phrase search"},
             {"name": "ops", "description": "Health and documentation"},
         ],
@@ -153,6 +177,47 @@ def create_app(
     )
     def get_page(page_id: str = ApiPath(..., min_length=1, examples=["page-002"])) -> dict:
         return get_page_info(db_path, page_id)
+
+    @app.get(
+        "/api/pages/{page_id}/review",
+        response_model=PageReviewSummary,
+        tags=["review"],
+        summary="List word blocks with citation and verification status",
+    )
+    def get_page_review_route(
+        page_id: str = ApiPath(..., min_length=1, examples=["page-006"]),
+    ) -> dict:
+        return get_page_review(db_path, page_id)
+
+    @app.put(
+        "/api/pages/{page_id}/review/blocks/{block_no}",
+        response_model=BlockReviewMutationResponse,
+        tags=["review"],
+        summary="Mark one uncataloged word block as non-body text",
+    )
+    def put_block_review(
+        payload: BlockReviewInput,
+        page_id: str = ApiPath(..., min_length=1, max_length=128, examples=["page-006"]),
+        block_no: int = ApiPath(..., ge=0, examples=[1]),
+    ) -> dict:
+        return mark_block_non_body(db_path, page_id, block_no, payload)
+
+    @app.delete(
+        "/api/pages/{page_id}/review/blocks/{block_no}",
+        response_model=BlockReviewMutationResponse,
+        tags=["review"],
+        summary="Remove a non-body mark so the block must be re-checked",
+    )
+    def delete_block_review(
+        page_id: str = ApiPath(..., min_length=1, max_length=128, examples=["page-006"]),
+        block_no: int = ApiPath(..., ge=0, examples=[1]),
+        expected_version: int = Query(
+            ...,
+            ge=1,
+            description="Optimistic token from the current review checklist",
+        ),
+    ) -> dict:
+        return clear_block_review(db_path, page_id, block_no, expected_version)
 
     @app.put(
         "/api/catalog/articles/{article_id}",

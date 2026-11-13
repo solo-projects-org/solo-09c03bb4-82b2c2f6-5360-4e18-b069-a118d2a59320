@@ -1,0 +1,53 @@
+{
+  "description": "Re-running OCR after recognition adjustments. Block 1 gets a corrected word box and block 3 gets a corrected word, so their review_version values bump and any marks on them are reset (review_marks_reset) and the blocks return to pending_review. Block 2 is byte-identical, so its mark is carried over (review_marks_carried). Block 4 stays cataloged.",
+  "image_url": "/scans/page-006.svg",
+  "width": 1600,
+  "height": 2200,
+  "blocks": [
+    {
+      "block_no": 1,
+      "words": [
+        {"text": "HARBOR", "bbox": [100, 90, 218, 125]},
+        {"text": "GAZETTE", "bbox": [225, 90, 355, 125]},
+        {"text": "PAGE", "bbox": [1320, 90, 1410, 125]},
+        {"text": "SIX", "bbox": [1420, 90, 1485, 125]}
+      ]
+    },
+    {
+      "block_no": 2,
+      "words": [
+        {"text": "TONIC", "bbox": [100, 260, 205, 295]},
+        {"text": "WATER", "bbox": [215, 260, 330, 295]},
+        {"text": "CURES", "bbox": [340, 260, 445, 295]},
+        {"text": "EVERY", "bbox": [455, 260, 565, 295]},
+        {"text": "AILMENT", "bbox": [575, 260, 715, 295]}
+      ]
+    },
+    {
+      "block_no": 3,
+      "words": [
+        {"text": "The", "bbox": [100, 480, 160, 515]},
+        {"text": "harbor", "bbox": [170, 480, 280, 515]},
+        {"text": "ferry", "bbox": [290, 480, 380, 515]},
+        {"text": "resumed", "bbox": [390, 480, 530, 515]},
+        {"text": "service", "bbox": [540, 480, 655, 515]},
+        {"text": "at", "bbox": [100, 530, 130, 565]},
+        {"text": "noon", "bbox": [140, 530, 220, 565]},
+        {"text": "after", "bbox": [230, 530, 320, 565]},
+        {"text": "the", "bbox": [330, 530, 385, 565]},
+        {"text": "storms", "bbox": [395, 530, 505, 565]}
+      ]
+    },
+    {
+      "block_no": 4,
+      "words": [
+        {"text": "Council", "bbox": [100, 760, 235, 795]},
+        {"text": "voted", "bbox": [245, 760, 340, 795]},
+        {"text": "to", "bbox": [350, 760, 380, 795]},
+        {"text": "repair", "bbox": [390, 760, 500, 795]},
+        {"text": "the", "bbox": [510, 760, 565, 795]},
+        {"text": "pier", "bbox": [575, 760, 645, 795]}
+      ]
+    }
+  ]
+}

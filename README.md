@@ -88,17 +88,55 @@ A-100 以 `dawn` 结束，A-200 以 `only` 开始，虽然二者同在 `page-002
 
 整个版面的 OCR 替换和索引重建都不会提交；更正前的查询结果照常可查。
 
+### 4. 版面核查：逐版找出漏编正文
+
+旧报上线前，档案员要逐版找出“OCR 已识别却没有任何文章引用”的有词块，并把页眉、广告等非正文块逐块标记。演示使用独立版面 `page-006`（不影响上面的检索样例）：
+
+1. `PUT /api/pages/page-006/ocr`，请求体用 `samples/page-006-review.json`。
+   该版有 4 个有词块：块 1 页眉、块 2 广告、块 3 漏编的正文、块 4 已编目正文。
+2. `PUT /api/catalog/articles/A-600`，请求体用 `samples/page-006-article.json`，
+   它引用块 4。
+3. `GET /api/pages/page-006/review` 取得核查清单。每个块返回：
+   - 原文 `text`、块字框 `bbox` 和逐词 `words[].bbox`；
+   - `review_status`：`cataloged`（已有编目引用）、`marked_non_body`（已标非正文）、
+     `pending_review`（待核查）；
+   - 乐观令牌 `review_version` 和变更来源 `last_change`。
+   此时块 4 为 `cataloged`，块 1–3 为 `pending_review`，整版 `review_status=pending_review`。
+4. 把页眉和广告标为非正文（`expected_version` 取自清单，例如均为 `1`）：
+   - `PUT /api/pages/page-006/review/blocks/1`，body `{"expected_version": 1, "reason": "running header"}`
+   - `PUT /api/pages/page-006/review/blocks/2`，body `{"expected_version": 1, "reason": "advertisement"}`
+5. 块 3 是漏编正文：先不要标记，可观察整版仍为 `pending_review`；演示中再对块 3
+   提交标记后，`GET .../review` 的整版状态变为 `complete`——所有有词块都有编目引用或有效标记。
+6. 需要撤销标记时：`DELETE /api/pages/page-006/review/blocks/2?expected_version=1`，
+   块 2 回到 `pending_review`。
+
+#### 重传 OCR 后自动重查
+
+- 用 `samples/page-006-rerun-identical.json` 重传：块号、词序、原文和字框全部不变，
+  响应 `review_marks_carried` 列出沿用的标记，`review_version` 不变，旧令牌仍可提交。
+- 用 `samples/page-006-rerun-changed.json` 重传：块 1 字框变化、块 3 原文变化，
+  它们的标记失效、令牌 +1 并回到 `pending_review`（`review_marks_reset`）；
+  块 2 内容不变，标记沿用（`review_marks_carried`）。
+- 用旧令牌提交变化过的块返回 **409 `review_version_stale`**，提示重新拉取清单；
+  其它块的变动不影响本块令牌。块被删除后即使原样恢复，令牌也已多次递增，旧提交同样被拒。
+- 块一旦被文章引用（`PUT /api/catalog/articles/...`），其标记在同一事务中撤销，
+  响应 `revoked_review_marks` 给出被撤销的块和新令牌；后来移出编目时令牌再次递增，
+  必须重查，旧标记不会复活。
+
 ## API
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| `PUT` | `/api/pages/{page_id}/ocr` | 替换单版 OCR，原子重建涉及该版的文章索引 |
+| `PUT` | `/api/pages/{page_id}/ocr` | 替换单版 OCR，原子重建涉及该版的文章索引并协调核查标记 |
 | `GET` | `/api/pages/{page_id}` | 查看版面 revision、块与词数 |
-| `PUT` | `/api/catalog/articles/{article_id}` | 新建/替换文章的块引用顺序 |
+| `GET` | `/api/pages/{page_id}/review` | 版面核查清单：有词块原文、字框、引用/核查状态与版本令牌 |
+| `PUT` | `/api/pages/{page_id}/review/blocks/{block_no}` | 把一个未引用有词块标为非正文（带 `expected_version`） |
+| `DELETE` | `/api/pages/{page_id}/review/blocks/{block_no}?expected_version=...` | 撤销非正文标记，块回到待核查 |
+| `PUT` | `/api/catalog/articles/{article_id}` | 新建/替换文章的块引用顺序；引用块会撤销其核查标记 |
 | `GET` | `/api/articles/{article_id}` | 查看文章块引用、索引状态与词数 |
 | `GET` | `/api/search/phrase?q=...` | 忽略大小写、连续词组的跨块/跨版检索 |
 | `GET` | `/api/search?q=...` | 同上，未写入 Swagger 的兼容别名 |
-| `GET` | `/health` | 健康检查与行数统计 |
+| `GET` | `/health` | 健康检查与行数统计（含 `review_marks`） |
 
 ### OCR 输入
 
@@ -172,8 +210,16 @@ A-100 以 `dawn` 结束，A-200 以 `only` 开始，虽然二者同在 `page-002
   1. 读取该版被哪些文章引用；
   2. 若请求缺少其中任何块，立即回滚整版；
   3. 替换该版 OCR 数据；
-  4. 按编目顺序重建且仅重建这些文章的整篇索引（跨版位置一并更新）；
-  5. 一次性提交。
+  4. 逐块比较旧/新指纹（块号、词序、原文、逐词字框）：完全相同的块沿用核查标记与
+     令牌；有差异或新增的块令牌递增并清除标记；删除的块保留历史并换发新令牌；
+  5. 按编目顺序重建且仅重建这些文章的整篇索引（跨版位置一并更新）；
+  6. 一次性提交。失败时 OCR、索引、核查状态全部不变。
+- 编目文章替换同样在单事务内完成：引用数 0→1 的块令牌递增、标记撤销；1→0（移出
+  编目）的块令牌递增并回到待核查；文章索引随后重建，任一步失败整体回滚。
+- 标记提交（`PUT`/`DELETE .../review/...`）在写事务内重新解析目标块：块已删除或无词
+  返回 404；块已被文章引用返回 409 `block_now_cataloged`；`expected_version` 与当前
+  `review_version` 不一致返回 409 `review_version_stale`。令牌按块单调递增、永不复用，
+  因此“变更后恢复原样”仍会拒绝旧提交；其它块的变化不影响本块令牌。
 - 查询使用单个 deferred read transaction，候选命中、词框和文章标题来自同一个快照。并发时只能看到提交前完整结果或提交后完整结果。
 - 未引用该版面的文章索引行不会删除或重写。
 
@@ -182,15 +228,20 @@ A-100 以 `dawn` 结束，A-200 以 `only` 开始，虽然二者同在 `page-002
 ```text
 app/
   main.py          FastAPI 路由、启动装载样例
-  repository.py    SQLite schema、事务、重建与检索
+  repository.py    SQLite schema、事务、重建、检索与版面核查
   schemas.py       请求/响应模型与 Swagger 示例
 samples/
   demo.json                    本地演示语料
   page-002-corrected.json      单版更正请求体
   page-002-missing-block.json  缺块拒绝请求体
+  page-006-review.json         版面核查演示版面（页眉/广告/漏编正文/已编目块）
+  page-006-article.json        核查演示的编目文章
+  page-006-rerun-identical.json 重跑 OCR 内容不变，标记沿用
+  page-006-rerun-changed.json   重跑 OCR 内容变化，标记失效、令牌递增
 static/scans/
-  page-001.svg, page-002.svg   由样例字框生成的演示版面图
+  page-001.svg, page-002.svg, page-006.svg  由样例字框生成的演示版面图
 tests/
   test_api.py      检索、更正、回滚、输入形式
-  test_atomic.py   写事务暂停时的读快照验证
+  test_atomic.py   写事务暂停时的读快照与核查状态原子性
+  test_review.py   核查清单、标记、重传沿用/失效、乐观令牌与编目撤销
 ```

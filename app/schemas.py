@@ -215,6 +215,14 @@ class CatalogArticleInput(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class ReviewMarkChange(BaseModel):
+    """A verification mark carried over or reset by an OCR retransmission."""
+
+    page_id: str
+    block_no: int
+    review_version: int
+
+
 class PageBlockInfo(BaseModel):
     block_no: int
     ordinal: int
@@ -238,6 +246,8 @@ class OCRUpdateResponse(BaseModel):
     blocks_count: int
     words_count: int
     affected_articles: list[str]
+    review_marks_carried: list[ReviewMarkChange]
+    review_marks_reset: list[ReviewMarkChange]
     message: str
 
 
@@ -249,6 +259,7 @@ class ArticleInfo(BaseModel):
     status: str
     indexed_words: int
     blocks: list[CatalogBlockRef]
+    revoked_review_marks: list[ReviewMarkChange] = []
 
 
 class WordLocation(BaseModel):
@@ -284,3 +295,86 @@ class HealthResponse(BaseModel):
     articles: int
     ocr_words: int
     indexed_words: int
+    review_marks: int
+
+
+# ---------------------------------------------------------------------------
+# Layout review (uncataloged word-block verification)
+# ---------------------------------------------------------------------------
+
+
+class ReviewWord(BaseModel):
+    word_no: int
+    text: str
+    bbox: BBox
+
+
+class BlockReviewInput(BaseModel):
+    """Body for marking one uncataloged word block as non-body text."""
+
+    expected_version: int = Field(
+        ge=1,
+        description=(
+            "Optimistic token: the review_version shown for this block when "
+            "the checklist was fetched. A stale token is rejected with 409."
+        ),
+    )
+    reason: str | None = Field(
+        default=None,
+        max_length=512,
+        examples=["page header, not article body"],
+    )
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {"expected_version": 1, "reason": "advertisement block"}
+        }
+    )
+
+
+class BlockReviewInfo(BaseModel):
+    block_no: int
+    ordinal: int
+    referenced: bool
+    review_status: str = Field(
+        description=(
+            "cataloged (cited by an article), marked_non_body (verified), "
+            "or pending_review (OCR text without citation or mark)"
+        )
+    )
+    review_version: int = Field(
+        description=(
+            "Monotonic per-block token. Changes whenever the block content or "
+            "its catalog-reference state changes; submit it back unchanged."
+        )
+    )
+    last_change: str | None
+    marked_reason: str | None
+    marked_at: str | None
+    marked_version: int | None
+    text: str
+    bbox: BBox
+    words: list[ReviewWord]
+
+
+class BlockReviewMutationResponse(BaseModel):
+    page_id: str
+    block_no: int
+    review: BlockReviewInfo
+    page_review_status: str
+    message: str
+
+
+class PageReviewSummary(BaseModel):
+    page_id: str
+    revision: int
+    updated_at: str
+    review_status: str = Field(
+        description="complete when every word block is cataloged or marked; "
+        "otherwise pending_review"
+    )
+    blocks_total: int
+    blocks_cataloged: int
+    blocks_marked_non_body: int
+    blocks_pending: int
+    blocks: list[BlockReviewInfo]

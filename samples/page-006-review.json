@@ -1,0 +1,53 @@
+{
+  "description": "Swagger layout-review demo. PUT this body to /api/pages/page-006/ocr first. Block 1 is a running header, block 2 is an advertisement, block 3 is an uncataloged body article, and block 4 is already cited by demo article A-600 (see samples/page-006-article.json).",
+  "image_url": "/scans/page-006.svg",
+  "width": 1600,
+  "height": 2200,
+  "blocks": [
+    {
+      "block_no": 1,
+      "words": [
+        {"text": "HARBOR", "bbox": [100, 90, 215, 125]},
+        {"text": "GAZETTE", "bbox": [225, 90, 355, 125]},
+        {"text": "PAGE", "bbox": [1320, 90, 1410, 125]},
+        {"text": "SIX", "bbox": [1420, 90, 1485, 125]}
+      ]
+    },
+    {
+      "block_no": 2,
+      "words": [
+        {"text": "TONIC", "bbox": [100, 260, 205, 295]},
+        {"text": "WATER", "bbox": [215, 260, 330, 295]},
+        {"text": "CURES", "bbox": [340, 260, 445, 295]},
+        {"text": "EVERY", "bbox": [455, 260, 565, 295]},
+        {"text": "AILMENT", "bbox": [575, 260, 715, 295]}
+      ]
+    },
+    {
+      "block_no": 3,
+      "words": [
+        {"text": "The", "bbox": [100, 480, 160, 515]},
+        {"text": "harbor", "bbox": [170, 480, 280, 515]},
+        {"text": "ferry", "bbox": [290, 480, 380, 515]},
+        {"text": "resumed", "bbox": [390, 480, 530, 515]},
+        {"text": "service", "bbox": [540, 480, 655, 515]},
+        {"text": "at", "bbox": [100, 530, 130, 565]},
+        {"text": "noon", "bbox": [140, 530, 220, 565]},
+        {"text": "after", "bbox": [230, 530, 320, 565]},
+        {"text": "the", "bbox": [330, 530, 385, 565]},
+        {"text": "storm", "bbox": [395, 530, 495, 565]}
+      ]
+    },
+    {
+      "block_no": 4,
+      "words": [
+        {"text": "Council", "bbox": [100, 760, 235, 795]},
+        {"text": "voted", "bbox": [245, 760, 340, 795]},
+        {"text": "to", "bbox": [350, 760, 380, 795]},
+        {"text": "repair", "bbox": [390, 760, 500, 795]},
+        {"text": "the", "bbox": [510, 760, 565, 795]},
+        {"text": "pier", "bbox": [575, 760, 645, 795]}
+      ]
+    }
+  ]
+}

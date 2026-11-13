@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="2200" viewBox="0 0 1600 2200">
+<rect width="100%" height="100%" fill="#f5f1e8"/>
+<text x="60" y="60" font-family="Georgia, serif" font-size="34" fill="#3b342a">page-006 — layout review demo scan</text>
+
+<!-- block 1: running header -->
+<rect x="100" y="90" width="115" height="35" fill="none" stroke="#c4b89f" stroke-width="1"/>
+<text x="100" y="120" font-family="Georgia, serif" font-size="28" fill="#222">HARBOR</text>
+<rect x="225" y="90" width="130" height="35" fill="none" stroke="#c4b89f" stroke-width="1"/>
+<text x="225" y="120" font-family="Georgia, serif" font-size="28" fill="#222">GAZETTE</text>
+<rect x="1320" y="90" width="90" height="35" fill="none" stroke="#c4b89f" stroke-width="1"/>
+<text x="1320" y="120" font-family="Georgia, serif" font-size="28" fill="#222">PAGE</text>
+<rect x="1420" y="90" width="65" height="35" fill="none" stroke="#c4b89f" stroke-width="1"/>
+<text x="1420" y="120" font-family="Georgia, serif" font-size="28" fill="#222">SIX</text>
+
+<!-- block 2: advertisement -->
+<rect x="100" y="260" width="105" height="35" fill="none" stroke="#c4b89f" stroke-width="1"/>
+<text x="100" y="290" font-family="Georgia, serif" font-size="28" fill="#222">TONIC</text>
+<rect x="215" y="260" width="115" height="35" fill="none" stroke="#c4b89f" stroke-width="1"/>
+<text x="215" y="290" font-family="Georgia, serif" font-size="28" fill="#222">WATER</text>
+<rect x="340" y="260" width="105" height="35" fill="none" stroke="#c4b89f" stroke-width="1"/>
+<text x="340" y="290" font-family="Georgia, serif" font-size="28" fill="#222">CURES</text>
+<rect x="455" y="260" width="110" height="35" fill="none" stroke="#c4b89f" stroke-width="1"/>
+<text x="455" y="290" font-family="Georgia, serif" font-size="28" fill="#222">EVERY</text>
+<rect x="575" y="260" width="140" height="35" fill="none" stroke="#c4b89f" stroke-width="1"/>
+<text x="575" y="290" font-family="Georgia, serif" font-size="28" fill="#222">AILMENT</text>
+
+<!-- block 3: uncataloged body article -->
+<rect x="100" y="480" width="60" height="35" fill="none" stroke="#c4b89f" stroke-width="1"/>
+<text x="100" y="510" font-family="Georgia, serif" font-size="28" fill="#222">The</text>
+<rect x="170" y="480" width="110" height="35" fill="none" stroke="#c4b89f" stroke-width="1"/>
+<text x="170" y="510" font-family="Georgia, serif" font-size="28" fill="#222">harbor</text>
+<rect x="290" y="480" width="90" height="35" fill="none" stroke="#c4b89f" stroke-width="1"/>
+<text x="290" y="510" font-family="Georgia, serif" font-size="28" fill="#222">ferry</text>
+<rect x="390" y="480" width="140" height="35" fill="none" stroke="#c4b89f" stroke-width="1"/>
+<text x="390" y="510" font-family="Georgia, serif" font-size="28" fill="#222">resumed</text>
+<rect x="540" y="480" width="115" height="35" fill="none" stroke="#c4b89f" stroke-width="1"/>
+<text x="540" y="510" font-family="Georgia, serif" font-size="28" fill="#222">service</text>
+<rect x="100" y="530" width="30" height="35" fill="none" stroke="#c4b89f" stroke-width="1"/>
+<text x="100" y="560" font-family="Georgia, serif" font-size="28" fill="#222">at</text>
+<rect x="140" y="530" width="80" height="35" fill="none" stroke="#c4b89f" stroke-width="1"/>
+<text x="140" y="560" font-family="Georgia, serif" font-size="28" fill="#222">noon</text>
+<rect x="230" y="530" width="90" height="35" fill="none" stroke="#c4b89f" stroke-width="1"/>
+<text x="230" y="560" font-family="Georgia, serif" font-size="28" fill="#222">after</text>
+<rect x="330" y="530" width="55" height="35" fill="none" stroke="#c4b89f" stroke-width="1"/>
+<text x="330" y="560" font-family="Georgia, serif" font-size="28" fill="#222">the</text>
+<rect x="395" y="530" width="100" height="35" fill="none" stroke="#c4b89f" stroke-width="1"/>
+<text x="395" y="560" font-family="Georgia, serif" font-size="28" fill="#222">storm</text>
+
+<!-- block 4: cataloged article body -->
+<rect x="100" y="760" width="135" height="35" fill="none" stroke="#c4b89f" stroke-width="1"/>
+<text x="100" y="790" font-family="Georgia, serif" font-size="28" fill="#222">Council</text>
+<rect x="245" y="760" width="95" height="35" fill="none" stroke="#c4b89f" stroke-width="1"/>
+<text x="245" y="790" font-family="Georgia, serif" font-size="28" fill="#222">voted</text>
+<rect x="350" y="760" width="30" height="35" fill="none" stroke="#c4b89f" stroke-width="1"/>
+<text x="350" y="790" font-family="Georgia, serif" font-size="28" fill="#222">to</text>
+<rect x="390" y="760" width="110" height="35" fill="none" stroke="#c4b89f" stroke-width="1"/>
+<text x="390" y="790" font-family="Georgia, serif" font-size="28" fill="#222">repair</text>
+<rect x="510" y="760" width="55" height="35" fill="none" stroke="#c4b89f" stroke-width="1"/>
+<text x="510" y="790" font-family="Georgia, serif" font-size="28" fill="#222">the</text>
+<rect x="575" y="760" width="70" height="35" fill="none" stroke="#c4b89f" stroke-width="1"/>
+<text x="575" y="790" font-family="Georgia, serif" font-size="28" fill="#222">pier</text>
+</svg>
